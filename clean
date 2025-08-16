@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+#
+#Delete all unnecessary files.
+#
+#$Id: pyclean.v $
+import os
+import os.path
+import re
+import sys
+
+
+from perlcompat import die, warn, getopts
+import tbdump
+
+def usage():
+    die(f"""\
+usage:{sys.argv[0]} [-qntzp] [-d #] [dir]
+-q quiet mode
+-n dry run
+-t remove TeX and LaTeX output files
+-z delete empty files
+-p delete PostScript files converted from plain text
+-d # delete older than # days""")
+
+def main():
+    opt = getopts('qntzpd:') or usage()
+    if sys.argv[1:]:
+        dir = sys.argv[1]
+    else:
+        dir = '.'
+    for dirpath, dirnames, filenames in os.walk(dir):
+        for filename in filenames:
+            fullpath = os.path.join(dirpath, filename)
+            base, ext = os.path.splitext(filename)
+            do_delete = False
+            if filename.endswith('~'):
+                do_delete = True
+            if re.match(r'\#.*\#$', filename):
+                do_delete = True
+            if re.search(r'\.bak$', filename, re.IGNORECASE):
+                do_delete = True
+            if filename.endswith('.rej'):
+                do_delete = True
+            if '_flylint' in filename:
+                do_delete = True
+            if opt.z and os.path.getsize(fullpath) == 0:
+                do_delete = True
+            if opt.t and re.search(
+                r'\.(dvi|auz|log|ps|bbl|blg|toc|lof|lot|cb|rel|out)$',
+                filename):
+                if os.path.exists(base + '.tex'):
+                    do_delete =True
+            if do_delete:
+                if not opt.q:
+                    print(fullpath)
+                if not opt.n:
+                    os.remove(fullpath)
+
+if __name__ == '__main__':
+    main()
+                        
+                    

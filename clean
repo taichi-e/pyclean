@@ -1,62 +1,147 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 #
-#Delete all unnecessary files.
+# Delete unnecessary files 
 #
-#$Id: pyclean.v $
+# options:
+#   -q  quiet mode（出力抑制）
+#   -n  dry run（削除せず表示のみ）
+#   -t  TeX/LaTeX の生成物を削除（*.dvi, *.aux, *.log, *.ps, *.bbl, *.blg, *.toc, *.lof, *.lot, *.cb, *.rel, *.out）
+#   -z  空ファイル(サイズ0)を削除
+#   -p  .txt から生成された .ps を削除（同名 .txt がある .ps を対象）
+#   -d #  更新時刻が # 日より古いファイルを削除
+#
+# usage:
+#   pyclean.py [-qntzp] [-d DAYS] [dir]
+
+import argparse
 import os
-import os.path
 import re
 import sys
+import time
 
 
-from perlcompat import die, warn, getopts
-import tbdump
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        add_help=True,
+        formatter_class=argparse.RawTextHelpFormatter,
+        description="Delete unnecessary files under a directory."
+    )
+    parser.add_argument("-q", action="store_true", dest="q",
+                        help="quiet mode (suppress listing)")
+    parser.add_argument("-n", action="store_true", dest="n",
+                        help="dry run (do not actually delete)")
+    parser.add_argument("-t", action="store_true", dest="t",
+                        help="delete TeX/LaTeX auxiliary outputs")
+    parser.add_argument("-z", action="store_true", dest="z",
+                        help="delete empty files (size == 0)")
+    parser.add_argument("-p", action="store_true", dest="p",
+                        help="delete .ps generated from plain text (.txt with same basename exists)")
+    parser.add_argument("-d", metavar="DAYS", type=float, dest="d",
+                        help="delete files older than DAYS (by mtime)")
+    parser.add_argument("dir", nargs="?", default=".",
+                        help="target directory (default: current directory)")
+    return parser.parse_args()
 
-def usage():
-    die(f"""\
-usage:{sys.argv[0]} [-qntzp] [-d #] [dir]
--q quiet mode
--n dry run
--t remove TeX and LaTeX output files
--z delete empty files
--p delete PostScript files converted from plain text
--d # delete older than # days""")
 
-def main():
-    opt = getopts('qntzpd:') or usage()
-    if sys.argv[1:]:
-        dir = sys.argv[1]
-    else:
-        dir = '.'
-    for dirpath, dirnames, filenames in os.walk(dir):
+TEX_AUX_PATTERN = re.compile(r'\.(dvi|aux|log|ps|bbl|blg|toc|lof|lot|cb|rel|out)$', re.IGNORECASE)
+
+def should_delete(filename: str,
+                  fullpath: str,
+                  base: str,
+                  opts: argparse.Namespace,
+                  now: float) -> bool:
+    # 1) バックアップ・一時ファイル系
+    if filename.endswith('~'):
+        return True
+    if re.match(r'\#.*\#$', filename):
+        return True
+    if re.search(r'\.bak$', filename, re.IGNORECASE):
+        return True
+    if re.search(r'\.drawio\.bkp$', filename, re.IGNORECASE):
+        return True
+    if filename.endswith('.rej'):
+        return True
+    if '_flylint' in filename:
+        return True
+
+    # 2) 空ファイル
+    if opts.z:
+        try:
+            if os.path.getsize(fullpath) == 0:
+                return True
+        except OSError:
+            # 取得できない場合は削除対象にしない
+            pass
+
+    # 3) TeX/LaTeX 生成物（同名 .tex が存在する場合のみ）
+    if opts.t and TEX_AUX_PATTERN.search(filename):
+        if os.path.exists(base + '.tex'):
+            return True
+
+    # 4) .txt から生成された .ps
+    if opts.p and filename.lower().endswith('.ps'):
+        if os.path.exists(base + '.txt'):
+            return True
+
+    # 5) しきい日数を超える古いファイル
+    if opts.d is not None:
+        try:
+            mtime = os.path.getmtime(fullpath)
+            age_days = (now - mtime) / 86400.0
+            if age_days >= opts.d:
+                return True
+        except OSError:
+            # 情報が取れないものは対象外
+            pass
+
+    return False
+
+
+def main() -> int:
+    opts = parse_args()
+    target_dir = opts.dir
+    now = time.time()
+
+    if not os.path.isdir(target_dir):
+        print(f"error: not a directory: {target_dir}", file=sys.stderr)
+        return 2
+
+    deleted = 0
+    listed = 0
+
+    for dirpath, dirnames, filenames in os.walk(target_dir):
         for filename in filenames:
             fullpath = os.path.join(dirpath, filename)
             base, ext = os.path.splitext(filename)
-            do_delete = False
-            if filename.endswith('~'):
-                do_delete = True
-            if re.match(r'\#.*\#$', filename):
-                do_delete = True
-            if re.search(r'\.bak$', filename, re.IGNORECASE):
-                do_delete = True
-            if filename.endswith('.rej'):
-                do_delete = True
-            if '_flylint' in filename:
-                do_delete = True
-            if opt.z and os.path.getsize(fullpath) == 0:
-                do_delete = True
-            if opt.t and re.search(
-                r'\.(dvi|auz|log|ps|bbl|blg|toc|lof|lot|cb|rel|out)$',
-                filename):
-                if os.path.exists(base + '.tex'):
-                    do_delete =True
-            if do_delete:
-                if not opt.q:
+
+            if should_delete(filename, fullpath, os.path.join(dirpath, base), opts, now):
+                if not opts.q:
                     print(fullpath)
-                if not opt.n:
-                    os.remove(fullpath)
+                listed += 1
+                if not opts.n:
+                    try:
+                        os.remove(fullpath)
+                        deleted += 1
+                    except FileNotFoundError:
+                        # 競合削除などで既に無い
+                        pass
+                    except PermissionError as e:
+                        print(f"warn: permission denied: {fullpath} ({e})", file=sys.stderr)
+                    except IsADirectoryError:
+                        # 念のため: ファイルのみを対象
+                        pass
+                    except OSError as e:
+                        print(f"warn: failed to remove {fullpath}: {e}", file=sys.stderr)
+
+    if not opts.q:
+        if opts.n:
+            print(f"[dry-run] {listed} file(s) would be removed.")
+        else:
+            print(f"{deleted} file(s) removed.")
+
+    return 0
+
 
 if __name__ == '__main__':
-    main()
-                        
-                    
+    sys.exit(main())
